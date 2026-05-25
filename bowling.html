@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>3D Bowling vs Domino Wall</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0d12; color: #e6e9ef; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  #app { width: 100vw; height: 100vh; display: block; }
+  #ui {
+    position: absolute;
+    top: 14px;
+    left: 14px;
+    background: rgba(18, 22, 30, 0.85);
+    backdrop-filter: blur(8px);
+    border: 1px solid #232936;
+    border-radius: 10px;
+    padding: 12px 14px;
+    font-size: 13px;
+    min-width: 240px;
+    z-index: 10;
+  }
+  #ui h2 {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.4px;
+    margin-bottom: 8px;
+    opacity: 0.9;
+  }
+  .row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+  .row label { flex: 0 0 88px; opacity: 0.75; font-size: 12px; }
+  .row input[type=range] { flex: 1; accent-color: #4f9eff; }
+  .row .v { width: 38px; text-align: right; font-variant-numeric: tabular-nums; opacity: 0.85; font-size: 12px; }
+  button {
+    width: 100%;
+    margin-top: 8px;
+    background: #1f2530;
+    color: #e6e9ef;
+    border: 1px solid #2c3342;
+    padding: 7px 10px;
+    border-radius: 7px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  button:hover { background: #28303d; }
+  #hint {
+    position: absolute;
+    bottom: 14px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 12px;
+    opacity: 0.65;
+    background: rgba(18, 22, 30, 0.7);
+    padding: 8px 14px;
+    border-radius: 8px;
+    pointer-events: none;
+    z-index: 10;
+  }
+  #loading {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #0a0d12;
+    z-index: 50;
+    font-size: 15px;
+    opacity: 0.85;
+  }
+  #status {
+    position: absolute;
+    top: 14px;
+    right: 14px;
+    background: rgba(18, 22, 30, 0.85);
+    border: 1px solid #232936;
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 12px;
+    line-height: 1.6;
+    z-index: 10;
+    min-width: 160px;
+  }
+  #status .k { opacity: 0.65; }
+  #status .val { font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+  <div id="loading">Загружаю Ammo.js…</div>
+
+  <div id="ui">
+    <h2>Боулинг vs стена</h2>
+    <div class="row">
+      <label>Сила броска</label>
+      <input type="range" id="force" min="20" max="120" step="1" value="55">
+      <div class="v" id="forceV">55</div>
+    </div>
+    <div class="row">
+      <label>Масса шара</label>
+      <input type="range" id="mass" min="2" max="30" step="0.5" value="8">
+      <div class="v" id="massV">8.0</div>
+    </div>
+    <div class="row">
+      <label>Прочность</label>
+      <input type="range" id="breakF" min="2" max="60" step="1" value="14">
+      <div class="v" id="breakV">14</div>
+    </div>
+    <button id="reset">Восстановить стену</button>
+    <button id="addBall">Дать ещё шар</button>
+  </div>
+
+  <div id="status">
+    <div><span class="k">Кубиков:</span> <span id="brickCount" class="val">0</span></div>
+    <div><span class="k">Разбито:</span> <span id="brokenCount" class="val">0</span></div>
+    <div><span class="k">Шаров:</span> <span id="ballCount" class="val">0</span></div>
+  </div>
+
+  <div id="hint">
+    ЛКМ — запустить шар в точку клика · ПКМ + перетаскивание / колесо — камера · R — сброс
+  </div>
+
+  <canvas id="app"></canvas>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script src="https://cdn.jsdelivr.net/gh/kripken/ammo.js@master/builds/ammo.js"></script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const loadingEl = document.getElementById('loading');
+
+Ammo().then(AmmoLib => {
+  const Ammo = AmmoLib;
+  loadingEl.style.display = 'none';
+  start(Ammo);
+});
+
+function start(Ammo) {
+  // ---------- Three.js setup ----------
+  const canvas = document.getElementById('app');
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.05;
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0f131b);
+  scene.fog = new THREE.Fog(0x0f131b, 35, 90);
+
+  const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 200);
+  camera.position.set(-14, 9, 14);
+
+  const controls = new OrbitControls(camera, canvas);
+  controls.target.set(0, 2, 0);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  controls.minDistance = 4;
+  controls.maxDistance = 60;
+  controls.maxPolarAngle = Math.PI * 0.49;
+  controls.mouseButtons = {
+    LEFT: null,                       // free LMB for shooting
+    MIDDLE: THREE.MOUSE.DOLLY,
+    RIGHT: THREE.MOUSE.ROTATE,
+  };
+
+  // ---------- Lights ----------
+  const hemi = new THREE.HemisphereLight(0xb1c5ff, 0x202028, 0.55);
+  scene.add(hemi);
+
+  const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+  sun.position.set(-12, 22, 10);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.camera.left = -25;
+  sun.shadow.camera.right = 25;
+  sun.shadow.camera.top = 25;
+  sun.shadow.camera.bottom = -25;
+  sun.shadow.camera.near = 1;
+  sun.shadow.camera.far = 60;
+  sun.shadow.bias = -0.0005;
+  sun.shadow.normalBias = 0.02;
+  scene.add(sun);
+
+  const fill = new THREE.DirectionalLight(0x8fb4ff, 0.35);
+  fill.position.set(15, 8, -8);
+  scene.add(fill);
+
+  // ---------- Ground ----------
+  const groundGeo = new THREE.PlaneGeometry(120, 120);
+  const groundMat = new THREE.MeshStandardMaterial({ color: 0x1a2230, roughness: 0.9, metalness: 0.05 });
+  const ground = new THREE.Mesh(groundGeo, groundMat);
+  ground.rotation.x = -Math.PI / 2;
+  ground.receiveShadow = true;
+  scene.add(ground);
+
+  // grid for orientation
+  const grid = new THREE.GridHelper(60, 60, 0x2c3344, 0x1c2230);
+  grid.position.y = 0.001;
+  scene.add(grid);
+
+  // ---------- Ammo physics world ----------
+  const collisionCfg = new Ammo.btDefaultCollisionConfiguration();
+  const dispatcher = new Ammo.btCollisionDispatcher(collisionCfg);
+  const broadphase = new Ammo.btDbvtBroadphase();
+  const solver = new Ammo.btSequentialImpulseConstraintSolver();
+  const world = new Ammo.btDiscreteDynamicsWorld(dispatcher, broadphase, solver, collisionCfg);
+  world.setGravity(new Ammo.btVector3(0, -9.81, 0));
+
+  const TRANSFORM_AUX = new Ammo.btTransform();
+
+  // Ground rigid body
+  {
+    const shape = new Ammo.btBoxShape(new Ammo.btVector3(60, 0.5, 60));
+    const transform = new Ammo.btTransform();
+    transform.setIdentity();
+    transform.setOrigin(new Ammo.btVector3(0, -0.5, 0));
+    const motion = new Ammo.btDefaultMotionState(transform);
+    const inertia = new Ammo.btVector3(0, 0, 0);
+    const info = new Ammo.btRigidBodyConstructionInfo(0, motion, shape, inertia);
+    const body = new Ammo.btRigidBody(info);
+    body.setFriction(0.85);
+    body.setRestitution(0.15);
+    world.addRigidBody(body);
+  }
+
+  // ---------- Bricks ----------
+  const dynamicObjects = []; // {mesh, body, isBrick, broken, neighbours:Set, constraints:[]}
+  const brickByBody = new WeakMap();
+
+  // Brick dimensions
+  const BX = 1.0, BY = 0.5, BZ = 0.5;
+  const COLS = 14;
+  const ROWS = 8;
+  const START_X = -((COLS - 1) * BX) / 2;
+  const START_Y = BY / 2 + 0.01;
+  const WALL_Z = 0;
+
+  const brickGeom = new THREE.BoxGeometry(BX, BY, BZ);
+
+  function brickColor(i, j) {
+    // alternating warm clay tones with slight noise
+    const base = (i + j) % 2 === 0 ? 0xc26a3a : 0xa75330;
+    const c = new THREE.Color(base);
+    c.offsetHSL(0, 0, (Math.random() - 0.5) * 0.06);
+    return c;
+  }
+
+  function makeBrick(i, j) {
+    const mat = new THREE.MeshStandardMaterial({
+      color: brickColor(i, j),
+      roughness: 0.75,
+      metalness: 0.05,
+    });
+    const mesh = new THREE.Mesh(brickGeom, mat);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+
+    // brick wall offset every other row
+    const offset = (j % 2 === 0) ? 0 : BX * 0.5;
+    const x = START_X + i * BX + offset;
+    const y = START_Y + j * BY;
+    const z = WALL_Z;
+    mesh.position.set(x, y, z);
+    scene.add(mesh);
+
+    const shape = new Ammo.btBoxShape(new Ammo.btVector3(BX / 2, BY / 2, BZ / 2));
+    const tr = new Ammo.btTransform();
+    tr.setIdentity();
+    tr.setOrigin(new Ammo.btVector3(x, y, z));
+    const motion = new Ammo.btDefaultMotionState(tr);
+    const mass = 1.5;
+    const inertia = new Ammo.btVector3(0, 0, 0);
+    shape.calculateLocalInertia(mass, inertia);
+    const info = new Ammo.btRigidBodyConstructionInfo(mass, motion, shape, inertia);
+    const body = new Ammo.btRigidBody(info);
+    body.setFriction(0.95);
+    body.setRollingFriction(0.05);
+    body.setRestitution(0.05);
+    body.setDamping(0.05, 0.05);
+    body.setActivationState(4); // DISABLE_DEACTIVATION while we settle, will be revisited
+    world.addRigidBody(body);
+
+    const record = {
+      mesh, body,
+      isBrick: true,
+      broken: false,
+      constraints: [],
+      neighbours: new Set(),
+      gridI: i, gridJ: j,
+    };
+    brickByBody.set(body, record);
+    dynamicObjects.push(record);
+    return record;
+  }
+
+  // P2P constraints between neighbouring bricks act as "glue" until impact breaks them
+  function makeJoint(a, b, pivotInA, pivotInB) {
+    const pa = new Ammo.btVector3(pivotInA.x, pivotInA.y, pivotInA.z);
+    const pb = new Ammo.btVector3(pivotInB.x, pivotInB.y, pivotInB.z);
+    const c = new Ammo.btPoint2PointConstraint(a.body, b.body, pa, pb);
+    world.addConstraint(c, true);
+    const breakingImpulse = parseFloat(document.getElementById('breakF').value);
+    c.setBreakingImpulseThreshold(breakingImpulse);
+    a.constraints.push({ ctr: c, other: b });
+    b.constraints.push({ ctr: c, other: a });
+    a.neighbours.add(b);
+    b.neighbours.add(a);
+    Ammo.destroy(pa); Ammo.destroy(pb);
+    return c;
+  }
+
+  let bricks = [];
+
+  function buildWall() {
+    // remove existing bricks/ball etc
+    for (const obj of dynamicObjects.slice()) {
+      removeObject(obj);
+    }
+    bricks = [];
+    // rebuild grid
+    const grid = [];
+    for (let j = 0; j < ROWS; j++) {
+      const row = [];
+      for (let i = 0; i < COLS; i++) {
+        const brick = makeBrick(i, j);
+        row.push(brick);
+        bricks.push(brick);
+      }
+      grid.push(row);
+    }
+
+    // joints: connect each brick to right and top neighbour
+    for (let j = 0; j < ROWS; j++) {
+      for (let i = 0; i < COLS; i++) {
+        const a = grid[j][i];
+        // right neighbour
+        if (i + 1 < COLS) {
+          const b = grid[j][i + 1];
+          makeJoint(a, b,
+            { x:  BX / 2, y: 0, z: 0 },
+            { x: -BX / 2, y: 0, z: 0 });
+        }
+        // top neighbour (offset every other row creates more realistic brick bond)
+        if (j + 1 < ROWS) {
+          const b = grid[j + 1][i];
+          const aOffset = (j % 2 === 0) ? 0 : BX * 0.5;
+          const bOffset = ((j + 1) % 2 === 0) ? 0 : BX * 0.5;
+          const localShift = bOffset - aOffset;
+          makeJoint(a, b,
+            { x: localShift / 2, y:  BY / 2, z: 0 },
+            { x: -localShift / 2, y: -BY / 2, z: 0 });
+        }
+      }
+    }
+
+    // settle: allow deactivation soon
+    setTimeout(() => {
+      for (const b of bricks) {
+        if (b.body) b.body.setActivationState(1); // ACTIVE_TAG, can sleep when still
+      }
+    }, 250);
+
+    updateStatus();
+  }
+
+  function removeObject(obj) {
+    if (!obj) return;
+    // remove constraints
+    for (const { ctr, other } of obj.constraints) {
+      // ensure other side no longer references it
+      if (other && other.constraints) {
+        other.constraints = other.constraints.filter(x => x.ctr !== ctr);
+      }
+      try { world.removeConstraint(ctr); Ammo.destroy(ctr); } catch (e) {}
+    }
+    obj.constraints = [];
+
+    if (obj.body) {
+      world.removeRigidBody(obj.body);
+      // motion state and shape will be GC'd by ammo eventually; explicit destroy is risky cross-call
+    }
+    if (obj.mesh) {
+      scene.remove(obj.mesh);
+      obj.mesh.geometry.dispose?.();
+      obj.mesh.material.dispose?.();
+    }
+    const idx = dynamicObjects.indexOf(obj);
+    if (idx >= 0) dynamicObjects.splice(idx, 1);
+  }
+
+  // ---------- Bowling balls ----------
+  const balls = [];
+  const ballGeom = new THREE.SphereGeometry(0.55, 32, 24);
+
+  function spawnBall(position, velocity, mass) {
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0x1f2937,
+      roughness: 0.25,
+      metalness: 0.85,
+      envMapIntensity: 1.0,
+    });
+    const mesh = new THREE.Mesh(ballGeom, mat);
+    mesh.position.copy(position);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    scene.add(mesh);
+
+    const shape = new Ammo.btSphereShape(0.55);
+    const tr = new Ammo.btTransform();
+    tr.setIdentity();
+    tr.setOrigin(new Ammo.btVector3(position.x, position.y, position.z));
+    const motion = new Ammo.btDefaultMotionState(tr);
+    const inertia = new Ammo.btVector3(0, 0, 0);
+    shape.calculateLocalInertia(mass, inertia);
+    const info = new Ammo.btRigidBodyConstructionInfo(mass, motion, shape, inertia);
+    const body = new Ammo.btRigidBody(info);
+    body.setFriction(0.6);
+    body.setRollingFriction(0.05);
+    body.setRestitution(0.35);
+    body.setDamping(0.02, 0.02);
+    body.setLinearVelocity(new Ammo.btVector3(velocity.x, velocity.y, velocity.z));
+    body.setActivationState(4);
+    world.addRigidBody(body);
+
+    const record = { mesh, body, isBall: true, constraints: [], neighbours: new Set() };
+    dynamicObjects.push(record);
+    balls.push(record);
+    brickByBody.set(body, record);
+    updateStatus();
+    return record;
+  }
+
+  // ---------- Click-to-shoot ----------
+  const raycaster = new THREE.Raycaster();
+  const mouseNDC = new THREE.Vector2();
+
+  canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+  canvas.addEventListener('pointerdown', e => {
+    if (e.button !== 0) return; // LMB only
+    const rect = canvas.getBoundingClientRect();
+    mouseNDC.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    mouseNDC.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(mouseNDC, camera);
+
+    // pick a target point: intersect with wall plane or ground
+    const wallPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -WALL_Z);
+    const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+    const hitWall = new THREE.Vector3();
+    const hitGround = new THREE.Vector3();
+    const ok1 = raycaster.ray.intersectPlane(wallPlane, hitWall);
+    const ok2 = raycaster.ray.intersectPlane(groundPlane, hitGround);
+
+    let target;
+    if (ok1 && hitWall.y > 0 && hitWall.y < (ROWS * BY + 1) && Math.abs(hitWall.x) < (COLS * BX)) {
+      target = hitWall;
+    } else if (ok2) {
+      target = hitGround;
+    } else {
+      return;
+    }
+
+    // launch position: behind the camera at a fixed distance from target, projected
+    const origin = camera.position.clone();
+    // bring ball slightly in front of camera so it doesn't spawn inside
+    const dir = target.clone().sub(origin).normalize();
+    const spawn = origin.clone().add(dir.clone().multiplyScalar(1.6));
+    spawn.y = Math.max(spawn.y, 1.2);
+
+    const force = parseFloat(document.getElementById('force').value);
+    const mass = parseFloat(document.getElementById('mass').value);
+
+    // velocity directed from spawn towards target, scaled by force
+    const velDir = target.clone().sub(spawn).normalize();
+    const velocity = velDir.multiplyScalar(force);
+
+    spawnBall(spawn, velocity, mass);
+  });
+
+  // ---------- Brick breaking detection ----------
+  // Ammo's setBreakingImpulseThreshold + isEnabled() lets us detect broken constraints each tick.
+  let brokenTotal = 0;
+
+  function reapBrokenConstraints() {
+    for (const obj of dynamicObjects) {
+      if (!obj.isBrick) continue;
+      // filter out broken
+      const remaining = [];
+      for (const c of obj.constraints) {
+        if (!c.ctr.isEnabled()) {
+          // disabled — joint snapped. Detach if still in world.
+          try { world.removeConstraint(c.ctr); } catch (e) {}
+          // ensure other side cleans up too
+          if (c.other && c.other.constraints) {
+            c.other.constraints = c.other.constraints.filter(x => x.ctr !== c.ctr);
+          }
+          if (!obj.broken) {
+            obj.broken = true;
+            brokenTotal++;
+          }
+          // keep the brick body active and visible — it just becomes free
+          obj.body.activate();
+        } else {
+          remaining.push(c);
+        }
+      }
+      obj.constraints = remaining;
+    }
+    updateStatus();
+  }
+
+  // ---------- Animation ----------
+  const tmpQ = new THREE.Quaternion();
+  const tmpV = new THREE.Vector3();
+  const clock = new THREE.Clock();
+
+  function syncTransforms() {
+    for (const obj of dynamicObjects) {
+      const ms = obj.body.getMotionState();
+      if (!ms) continue;
+      ms.getWorldTransform(TRANSFORM_AUX);
+      const p = TRANSFORM_AUX.getOrigin();
+      const q = TRANSFORM_AUX.getRotation();
+      obj.mesh.position.set(p.x(), p.y(), p.z());
+      obj.mesh.quaternion.set(q.x(), q.y(), q.z(), q.w());
+
+      // cull objects that fall off
+      if (p.y() < -10) {
+        removeObject(obj);
+      }
+    }
+  }
+
+  function tick() {
+    const dt = Math.min(0.033, clock.getDelta());
+    world.stepSimulation(dt, 6, 1 / 120);
+
+    syncTransforms();
+    reapBrokenConstraints();
+
+    controls.update();
+    renderer.render(scene, camera);
+    requestAnimationFrame(tick);
+  }
+
+  // ---------- UI ----------
+  const forceEl = document.getElementById('force');
+  const forceV = document.getElementById('forceV');
+  const massEl = document.getElementById('mass');
+  const massV = document.getElementById('massV');
+  const breakEl = document.getElementById('breakF');
+  const breakV = document.getElementById('breakV');
+
+  function syncLabels() {
+    forceV.textContent = forceEl.value;
+    massV.textContent = parseFloat(massEl.value).toFixed(1);
+    breakV.textContent = breakEl.value;
+  }
+  syncLabels();
+  forceEl.addEventListener('input', syncLabels);
+  massEl.addEventListener('input', syncLabels);
+  breakEl.addEventListener('input', () => {
+    syncLabels();
+    // update breaking threshold of existing joints live
+    const v = parseFloat(breakEl.value);
+    for (const obj of dynamicObjects) {
+      for (const c of obj.constraints) c.ctr.setBreakingImpulseThreshold(v);
+    }
+  });
+
+  document.getElementById('reset').addEventListener('click', () => {
+    brokenTotal = 0;
+    buildWall();
+  });
+  document.getElementById('addBall').addEventListener('click', () => {
+    // drop a ball from above the camera, aimed at wall center
+    const origin = camera.position.clone().add(new THREE.Vector3(0, 2, 0));
+    const target = new THREE.Vector3(0, ROWS * BY * 0.5, 0);
+    const dir = target.clone().sub(origin).normalize();
+    const spawn = origin.clone().add(dir.clone().multiplyScalar(1.5));
+    const force = parseFloat(forceEl.value);
+    const mass = parseFloat(massEl.value);
+    spawnBall(spawn, dir.multiplyScalar(force), mass);
+  });
+
+  window.addEventListener('keydown', e => {
+    if (e.key === 'r' || e.key === 'R') {
+      brokenTotal = 0;
+      buildWall();
+    }
+  });
+
+  // status panel
+  const brickCountEl = document.getElementById('brickCount');
+  const brokenCountEl = document.getElementById('brokenCount');
+  const ballCountEl = document.getElementById('ballCount');
+  function updateStatus() {
+    const bricks = dynamicObjects.filter(o => o.isBrick).length;
+    const balls = dynamicObjects.filter(o => o.isBall).length;
+    brickCountEl.textContent = bricks;
+    brokenCountEl.textContent = brokenTotal;
+    ballCountEl.textContent = balls;
+  }
+
+  // ---------- Resize ----------
+  window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  buildWall();
+  tick();
+}
+</script>
+</body>
+</html>
