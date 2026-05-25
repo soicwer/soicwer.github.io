@@ -309,7 +309,9 @@ function start(Ammo) {
 
   // ---------- Bricks ----------
   const dynamicObjects = []; // {mesh, body, isBrick, broken, neighbours:Set, constraints:[]}
-  const brickByBody = new WeakMap();
+  // Ammo.castObject returns new JS wrappers each time, so a WeakMap by body
+  // doesn't work. Key by underlying C++ pointer (body.ptr) instead.
+  const recordByPtr = new Map();
 
   // Brick dimensions
   const BX = 1.0, BY = 0.5, BZ = 0.5;
@@ -372,21 +374,24 @@ function start(Ammo) {
       neighbours: new Set(),
       gridI: i, gridJ: j,
     };
-    brickByBody.set(body, record);
+    recordByPtr.set(body.ptr, record);
     dynamicObjects.push(record);
     return record;
   }
 
-  // P2P constraints between neighbouring bricks act as "glue" until impact breaks them
+  // P2P constraints between neighbouring bricks act as "glue".
+  // Ammo's setBreakingImpulseThreshold + isEnabled() check isn't reliably
+  // exposed in the JS bindings, so we detect breakage manually from contact
+  // manifold impulses (see detectImpacts below).
   function makeJoint(a, b, pivotInA, pivotInB) {
     const pa = new Ammo.btVector3(pivotInA.x, pivotInA.y, pivotInA.z);
     const pb = new Ammo.btVector3(pivotInB.x, pivotInB.y, pivotInB.z);
     const c = new Ammo.btPoint2PointConstraint(a.body, b.body, pa, pb);
     world.addConstraint(c, true);
-    const breakingImpulse = parseFloat(document.getElementById('breakF').value);
-    c.setBreakingImpulseThreshold(breakingImpulse);
-    a.constraints.push({ ctr: c, other: b });
-    b.constraints.push({ ctr: c, other: a });
+    const rec = { ctr: c, other: b };
+    const recB = { ctr: c, other: a };
+    a.constraints.push(rec);
+    b.constraints.push(recB);
     a.neighbours.add(b);
     b.neighbours.add(a);
     Ammo.destroy(pa); Ammo.destroy(pb);
@@ -460,6 +465,7 @@ function start(Ammo) {
     obj.constraints = [];
 
     if (obj.body) {
+      recordByPtr.delete(obj.body.ptr);
       world.removeRigidBody(obj.body);
       // motion state and shape will be GC'd by ammo eventually; explicit destroy is risky cross-call
     }
@@ -509,7 +515,7 @@ function start(Ammo) {
     const record = { mesh, body, isBall: true, constraints: [], neighbours: new Set() };
     dynamicObjects.push(record);
     balls.push(record);
-    brickByBody.set(body, record);
+    recordByPtr.set(body.ptr, record);
     updateStatus();
     return record;
   }
@@ -562,33 +568,50 @@ function start(Ammo) {
   });
 
   // ---------- Brick breaking detection ----------
-  // Ammo's setBreakingImpulseThreshold + isEnabled() lets us detect broken constraints each tick.
+  // Detect impacts manually by walking through Bullet's contact manifolds and
+  // checking per-contact applied impulses. When a brick takes an impact stronger
+  // than the threshold, snap all of its joints to its neighbours so it can fly off.
   let brokenTotal = 0;
+  let breakThreshold = parseFloat(document.getElementById('breakF').value);
 
-  function reapBrokenConstraints() {
-    for (const obj of dynamicObjects) {
-      if (!obj.isBrick) continue;
-      // filter out broken
-      const remaining = [];
-      for (const c of obj.constraints) {
-        if (!c.ctr.isEnabled()) {
-          // disabled — joint snapped. Detach if still in world.
-          try { world.removeConstraint(c.ctr); } catch (e) {}
-          // ensure other side cleans up too
-          if (c.other && c.other.constraints) {
-            c.other.constraints = c.other.constraints.filter(x => x.ctr !== c.ctr);
-          }
-          if (!obj.broken) {
-            obj.broken = true;
-            brokenTotal++;
-          }
-          // keep the brick body active and visible — it just becomes free
-          obj.body.activate();
-        } else {
-          remaining.push(c);
-        }
+  function breakBrickJoints(obj) {
+    if (!obj || !obj.isBrick) return;
+    if (obj.constraints.length === 0) return;
+    for (const c of obj.constraints) {
+      try { world.removeConstraint(c.ctr); } catch (e) {}
+      if (c.other && c.other.constraints) {
+        c.other.constraints = c.other.constraints.filter(x => x.ctr !== c.ctr);
       }
-      obj.constraints = remaining;
+    }
+    obj.constraints = [];
+    if (!obj.broken) {
+      obj.broken = true;
+      brokenTotal++;
+    }
+    obj.body.activate(true);
+  }
+
+  function detectImpacts() {
+    const num = dispatcher.getNumManifolds();
+    for (let i = 0; i < num; i++) {
+      const m = dispatcher.getManifoldByIndexInternal(i);
+      const numContacts = m.getNumContacts();
+      if (numContacts === 0) continue;
+      let maxImp = 0;
+      for (let j = 0; j < numContacts; j++) {
+        const cp = m.getContactPoint(j);
+        const imp = cp.getAppliedImpulse();
+        if (imp > maxImp) maxImp = imp;
+      }
+      if (maxImp <= breakThreshold) continue;
+
+      // resolve both bodies to our records via pointer
+      const b0 = Ammo.castObject(m.getBody0(), Ammo.btRigidBody);
+      const b1 = Ammo.castObject(m.getBody1(), Ammo.btRigidBody);
+      const r0 = recordByPtr.get(b0.ptr);
+      const r1 = recordByPtr.get(b1.ptr);
+      if (r0?.isBrick) breakBrickJoints(r0);
+      if (r1?.isBrick) breakBrickJoints(r1);
     }
     updateStatus();
   }
@@ -620,7 +643,7 @@ function start(Ammo) {
     world.stepSimulation(dt, 6, 1 / 120);
 
     syncTransforms();
-    reapBrokenConstraints();
+    detectImpacts();
 
     controls.update();
     renderer.render(scene, camera);
@@ -645,11 +668,7 @@ function start(Ammo) {
   massEl.addEventListener('input', syncLabels);
   breakEl.addEventListener('input', () => {
     syncLabels();
-    // update breaking threshold of existing joints live
-    const v = parseFloat(breakEl.value);
-    for (const obj of dynamicObjects) {
-      for (const c of obj.constraints) c.ctr.setBreakingImpulseThreshold(v);
-    }
+    breakThreshold = parseFloat(breakEl.value);
   });
 
   document.getElementById('reset').addEventListener('click', () => {
