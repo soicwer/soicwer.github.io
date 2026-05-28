@@ -1,0 +1,11 @@
+{
+  "name": "РусИнвест Трекер",
+  "short_name": "РИТ",
+  "description": "Учёт портфеля и аналитика российского фондового рынка",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0f1c",
+  "theme_color": "#0a0f1c",
+  "lang": "ru",
+  "icons": []
+}
