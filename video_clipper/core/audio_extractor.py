@@ -1,15 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-ШАГ 2. Извлечение аудиодорожки из видеофайла.
+ШАГ 2. Извлечение аудиодорожки из видеофайла через MoviePy.
 
-В финальной реализации будет использоваться moviepy:
-
-    from moviepy.editor import VideoFileClip
-    clip = VideoFileClip(video_path)
-    clip.audio.write_audiofile(audio_path, codec="pcm_s16le", fps=16000)
-
-Сейчас функция — заглушка. Подробная реализация появится на следующем
-этапе. Запуск из GUI приводит к понятному сообщению в журнале.
+Whisper ожидает на входе аудио 16 кГц, моно. Поэтому мы сразу при
+извлечении приводим звук к нужному формату, чтобы не делать лишний
+ресемплинг внутри Whisper.
 """
 
 import os
@@ -30,24 +25,49 @@ def extract_audio(video_path: str, output_dir: str) -> str:
     Возвращает:
         путь к сохранённому WAV-файлу.
     """
-    logger.info("extract_audio: %s → %s", video_path, output_dir)
+    if not os.path.isfile(video_path):
+        raise FileNotFoundError(f"Видеофайл не найден: {video_path}")
+
+    os.makedirs(output_dir, exist_ok=True)
 
     # Имя аудио = имя видео без расширения + .wav
     base = os.path.splitext(os.path.basename(video_path))[0]
     audio_path = os.path.join(output_dir, f"{base}.wav")
 
-    # TODO (шаг 2): подключить moviepy
-    #
-    #     from moviepy.editor import VideoFileClip
-    #     with VideoFileClip(video_path) as clip:
-    #         clip.audio.write_audiofile(
-    #             audio_path,
-    #             fps=16000,            # Whisper хочет 16 кГц
-    #             nbytes=2,             # 16-битный PCM
-    #             codec="pcm_s16le",
-    #             ffmpeg_params=["-ac", "1"],   # моно
-    #         )
+    logger.info("Извлекаю аудио: %s → %s", video_path, audio_path)
 
-    raise NotImplementedError(
-        "Шаг 2 (извлечение аудио через moviepy) пока не реализован."
-    )
+    # Импортируем moviepy лениво — окно открывается мгновенно, даже
+    # если библиотека ещё не подгружена (она тяжёлая).
+    try:
+        # moviepy v1: from moviepy.editor import VideoFileClip
+        # moviepy v2: from moviepy import VideoFileClip
+        try:
+            from moviepy.editor import VideoFileClip
+        except ImportError:
+            from moviepy import VideoFileClip  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError(
+            "Не установлена библиотека moviepy. "
+            "Запустите: pip install moviepy"
+        ) from exc
+
+    with VideoFileClip(video_path) as clip:
+        if clip.audio is None:
+            raise RuntimeError("В исходном видео отсутствует аудиодорожка.")
+
+        # 16 кГц моно — нужный Whisper формат
+        clip.audio.write_audiofile(
+            audio_path,
+            fps=16000,
+            nbytes=2,
+            codec="pcm_s16le",
+            ffmpeg_params=["-ac", "1"],   # принудительно один канал
+            logger=None,                  # глушим прогресс-бар MoviePy в stdout
+        )
+
+    if not os.path.isfile(audio_path):
+        raise RuntimeError(f"Не удалось создать WAV-файл: {audio_path}")
+
+    logger.info("Аудио извлечено: %s (%.1f МБ)",
+                audio_path, os.path.getsize(audio_path) / 1_048_576)
+    return audio_path

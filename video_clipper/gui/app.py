@@ -17,6 +17,8 @@
 """
 
 import os
+import subprocess
+import sys
 import threading
 from tkinter import filedialog
 
@@ -277,17 +279,17 @@ class VideoClipperApp(ctk.CTk):
         self.min_duration_entry = LabeledEntry(
             durations_row,
             label_text="Мин. длина клипа, сек",
-            placeholder="30",
+            placeholder="60",
         )
-        self.min_duration_entry.set("30")
+        self.min_duration_entry.set("60")
         self.min_duration_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
 
         self.max_duration_entry = LabeledEntry(
             durations_row,
-            label_text="Макс. длина клипа, сек",
-            placeholder="50",
+            label_text="Макс. длина клипа, сек (≈1.5 мин)",
+            placeholder="90",
         )
-        self.max_duration_entry.set("50")
+        self.max_duration_entry.set("90")
         self.max_duration_entry.grid(row=0, column=1, sticky="ew", padx=(8, 0))
 
         # --- Модель Whisper и позиция баннера ---
@@ -433,6 +435,21 @@ class VideoClipperApp(ctk.CTk):
         )
         self.start_button.grid(row=0, column=1, rowspan=2, sticky="e", padx=(12, 0))
 
+        # Кнопка «Открыть папку с готовыми клипами» — для быстрого доступа
+        self.open_folder_button = ctk.CTkButton(
+            progress_panel,
+            text="📂  Открыть папку",
+            width=160,
+            height=42,
+            corner_radius=theme.RADIUS_MEDIUM,
+            fg_color=theme.BG_TERTIARY,
+            hover_color=theme.ACCENT_HOVER,
+            text_color=theme.TEXT_PRIMARY,
+            font=(theme.FONT_FAMILY, theme.FONT_SIZE_BODY),
+            command=self._on_open_output_dir,
+        )
+        self.open_folder_button.grid(row=0, column=2, rowspan=2, sticky="e", padx=(8, 0))
+
     def _build_status_bar(self) -> None:
         """Нижняя строка состояния."""
         self.status_bar = StatusBar(self)
@@ -498,6 +515,42 @@ class VideoClipperApp(ctk.CTk):
         self.config_state.banner_path = path
         self.banner_path_var.set(path)
         self._append_log(f"✓ Баннер: {os.path.basename(path)}\n")
+
+    def _on_open_output_dir(self) -> None:
+        """Открывает папку с готовыми клипами в системном файловом менеджере."""
+        path = self.output_dir_var.get().strip()
+        if not path:
+            self._append_log("✗ Папка вывода ещё не выбрана.\n")
+            return
+        if not os.path.isdir(path):
+            # Возможно папка ещё не создана — создадим
+            try:
+                os.makedirs(path, exist_ok=True)
+            except OSError as exc:
+                self._append_log(f"✗ Не удалось создать папку: {exc}\n")
+                return
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except Exception as exc:  # noqa: BLE001
+            self._append_log(f"✗ Не удалось открыть папку: {exc}\n")
+
+    def _probe_video_duration(self, video_path: str) -> float:
+        """Возвращает длительность видео в секундах через moviepy."""
+        try:
+            try:
+                from moviepy.editor import VideoFileClip
+            except ImportError:
+                from moviepy import VideoFileClip  # type: ignore
+            with VideoFileClip(video_path) as clip:
+                return float(clip.duration or 0.0)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Не удалось определить длительность: %s", exc)
+            return 0.0
 
     def _on_start(self) -> None:
         """Запускает фоновую обработку видео в отдельном потоке."""
@@ -579,25 +632,59 @@ class VideoClipperApp(ctk.CTk):
 
             cfg = self.config_state
 
-            self._update_progress(0.05, "Шаг 1/5: Извлечение аудиодорожки…")
+            # ----- Шаг 1: Извлечение аудио -----
+            self._update_progress(0.05, "Шаг 1/4: Извлечение аудиодорожки…")
             audio_path = extract_audio(cfg.video_path, cfg.output_dir)
-            self._append_log(f"  → Аудио сохранено: {audio_path}\n")
+            self._append_log(f"  → Аудио сохранено: {os.path.basename(audio_path)}\n")
 
-            self._update_progress(0.25, "Шаг 2/5: Транскрипция (Whisper)…")
+            # Заодно узнаем длительность видео, чтобы корректно
+            # ограничивать интервалы клипов в hype_finder.
+            video_duration = self._probe_video_duration(cfg.video_path)
+            self._append_log(f"  → Длительность видео: {video_duration:.1f} сек\n")
+
+            # ----- Шаг 2: Транскрипция -----
+            self._update_progress(0.20, "Шаг 2/4: Транскрипция речи (Whisper)…")
             segments = transcribe_audio(audio_path, model_name=cfg.whisper_model)
             self._append_log(f"  → Распознано сегментов: {len(segments)}\n")
 
-            self._update_progress(0.55, "Шаг 3/5: Поиск хайповых моментов…")
+            # Удаляем временный WAV — он больше не нужен
+            try:
+                os.remove(audio_path)
+            except OSError:
+                pass
+
+            # ----- Шаг 3: Поиск хайповых моментов -----
+            self._update_progress(0.55, "Шаг 3/4: Поиск интересных моментов…")
             moments = find_hype_moments(
                 segments,
                 keywords=cfg.keywords,
                 min_seconds=cfg.min_clip_seconds,
                 max_seconds=cfg.max_clip_seconds,
+                video_duration=video_duration,
+                max_clips=cfg.max_clips,
             )
-            self._append_log(f"  → Найдено моментов: {len(moments)}\n")
+            self._append_log(f"  → Будет нарезано клипов: {len(moments)}\n")
+            if not moments:
+                self._append_log(
+                    "  ⚠ Не удалось найти ни одного подходящего фрагмента.\n"
+                )
+                self.after(0, lambda: self.status_bar.set_status(
+                    "Не найдено фрагментов для нарезки", theme.WARNING,
+                ))
+                return
 
-            self._update_progress(0.70, "Шаг 4/5: Нарезка клипов 9:16…")
+            # ----- Шаг 4: Нарезка + баннер -----
+            total = len(moments)
+            saved_paths: list[str] = []
             for idx, moment in enumerate(moments, start=1):
+                # Прогресс растёт линейно от 0.60 до 1.00 по мере нарезки
+                stage_progress = 0.60 + 0.40 * (idx - 1) / total
+                duration = moment["end"] - moment["start"]
+                self._update_progress(
+                    stage_progress,
+                    f"Шаг 4/4: Клип {idx}/{total} ({duration:.0f} сек)…",
+                )
+
                 clip_path = cut_vertical_clip(
                     video_path=cfg.video_path,
                     start=moment["start"],
@@ -606,37 +693,38 @@ class VideoClipperApp(ctk.CTk):
                     index=idx,
                     use_blur=cfg.use_blur_background,
                 )
-                self._append_log(f"  → Клип {idx}: {os.path.basename(clip_path)}\n")
 
-                # Шаг 5/5 — наложение баннера
+                # Опциональный баннер
                 if cfg.banner_path and cfg.banner_position != "не накладывать":
+                    self._append_log(f"  → Накладываю баннер на клип {idx}…\n")
                     overlay_banner(
                         clip_path=clip_path,
                         banner_path=cfg.banner_path,
                         position=cfg.banner_position,
                     )
 
-            self._update_progress(1.0, "Готово!")
-            self._append_log("\n✓ Все клипы сохранены в папке вывода.\n")
-            self.after(0, lambda: self.status_bar.set_status(
-                "Готово", theme.SUCCESS,
-            ))
+                saved_paths.append(clip_path)
+                size_mb = os.path.getsize(clip_path) / 1_048_576
+                self._append_log(
+                    f"  ✓ Готов: {os.path.basename(clip_path)} ({size_mb:.1f} МБ)\n"
+                )
 
-        except NotImplementedError as exc:
-            # Пока модули core/ — заглушки, специально кидающие эту ошибку
+            self._update_progress(1.0, f"Готово! Сохранено клипов: {len(saved_paths)}")
             self._append_log(
-                f"\n⚠ Этот шаг ещё не реализован: {exc}\n"
-                "  (см. README — заглушки будут заменены на следующих этапах)\n"
+                f"\n✓ Все {len(saved_paths)} клипов сохранены в:\n   {cfg.output_dir}\n"
+                "  Нажмите «Открыть папку», чтобы забрать готовые видео.\n"
             )
             self.after(0, lambda: self.status_bar.set_status(
-                "Реализованы только шаги 1 (GUI). См. журнал.", theme.WARNING,
+                f"Готово: {len(saved_paths)} клипов в {cfg.output_dir}",
+                theme.SUCCESS,
             ))
 
         except Exception as exc:  # noqa: BLE001 — показываем любую ошибку в логе
             logger.exception("Ошибка при обработке")
-            self._append_log(f"\n✗ Ошибка: {exc}\n")
-            self.after(0, lambda: self.status_bar.set_status(
-                f"Ошибка: {exc}", theme.DANGER,
+            message = str(exc)
+            self._append_log(f"\n✗ Ошибка: {message}\n")
+            self.after(0, lambda m=message: self.status_bar.set_status(
+                f"Ошибка: {m}", theme.DANGER,
             ))
 
         finally:

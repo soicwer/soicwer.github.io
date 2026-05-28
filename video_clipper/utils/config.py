@@ -24,8 +24,9 @@ class AppConfig:
     output_dir: str = ""                 # Папка, куда сохранять готовые клипы
 
     # --- Параметры нарезки ---
-    min_clip_seconds: int = 30           # Минимальная длительность одного Shorts
-    max_clip_seconds: int = 50           # Максимальная длительность
+    min_clip_seconds: int = 60           # Минимальная длительность одного Shorts
+    max_clip_seconds: int = 90           # Максимальная длительность (~1.5 минуты)
+    max_clips: int = 10                  # Сколько лучших клипов оставить
     use_blur_background: bool = True     # Размытый фон в формате 9:16
 
     # --- Поиск хайповых моментов ---
